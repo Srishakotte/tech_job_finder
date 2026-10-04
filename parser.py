@@ -228,6 +228,25 @@ def detect_eligibility(text):
 
     return " · ".join(pieces) if pieces else None
 
+def detect_experience(text):
+    explicit = labelled_value(
+        text,
+        ["experience", "work experience", "years of experience", "seniority"]
+    )
+    if explicit:
+        return explicit
+
+    patterns = [
+        r"(?i)\b(?:freshers?|entry[- ]level|early career)\b",
+        r"(?i)\b\d+\s*[-–to]+\s*\d+\s*(?:years?|yrs?)\s*(?:of\s*)?experience\b",
+        r"(?i)\b\d+\+?\s*(?:years?|yrs?)\s*(?:of\s*)?experience\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return clean(match.group(0))
+    return None
+
 def detect_skills(text):
     found = []
     low = text.lower()
@@ -283,6 +302,7 @@ def parse_job_post(text):
     location = detect_location(text)
     ctc, ctc_source = detect_ctc(text)
     eligibility = detect_eligibility(text)
+    experience = detect_experience(text)
     skills = detect_skills(text)
     job_description = detect_description(text)
     company_description = detect_company_description(text)
@@ -294,6 +314,7 @@ def parse_job_post(text):
         "ctc": ctc,
         "ctc_source": ctc_source,
         "eligibility": eligibility,
+        "experience": experience,
         "skills": skills,
         "job_description": job_description,
         "company_description": company_description,
@@ -326,6 +347,7 @@ def apply_correction(data, correction_text):
         "location": ["location", "city"],
         "ctc": ["ctc", "salary", "package"],
         "eligibility": ["eligibility", "qualification", "batch"],
+        "experience": ["experience", "work experience"],
         "application_link": ["link", "url", "apply"],
     }
 

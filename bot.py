@@ -162,6 +162,9 @@ def format_job_preview(data):
 🎓 Eligibility
 {show(data.get("eligibility"))}
 
+🧭 Experience
+{show(data.get("experience"))}
+
 🛠 Skills
 {skills_text}
 
@@ -485,6 +488,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     🎓 Eligibility
     {edit_value(data.get("eligibility"), "Not detected")}
 
+    🧭 Experience
+    {edit_value(data.get("experience"), "Not detected")}
+
     🛠 Skills
     {edit_value(data.get("skills"), "Not detected")}
 
@@ -500,6 +506,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     location: {edit_value(data.get("location"))}
     ctc: {edit_value(data.get("ctc"))}
     eligibility: {edit_value(data.get("eligibility"))}
+    experience: {edit_value(data.get("experience"))}
     skills: {edit_value(data.get("skills"))}"""
 
         await query.message.reply_text(change_template)
@@ -748,6 +755,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 location=data.get("location"),
                 ctc=data.get("ctc"),
                 eligibility=data.get("eligibility"),
+                experience=data.get("experience"),
                 skills=(
                     " · ".join(data["skills"])
                     if isinstance(data.get("skills"), list)
@@ -770,10 +778,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption_path = result["caption"]
             data["video_path"] = video_path
 
+            with open(result["card"], "rb") as preview_image:
+                await query.message.reply_photo(
+                    photo=preview_image,
+                    caption="🖼️ Still preview of the exact Reel layout. Check the job details and image below.",
+                )
+
             with open(video_path, "rb") as video:
                 await query.message.reply_video(
                     video=video,
-                    caption="🎬 Your job Reel is ready!",
+                    caption="🎬 Full animated Reel preview. Publishing still requires your confirmation.",
                 )
 
             pending_captions[user_id] = caption_path

@@ -40,6 +40,8 @@ def _response(start_response, status, body, content_type="text/plain; charset=ut
 
 
 def _is_valid_signature(body, supplied_signature, app_secret):
+    supplied_signature = supplied_signature.strip().lower()
+    app_secret = app_secret.strip()
     if not supplied_signature or not supplied_signature.startswith("sha256="):
         return False
     expected = "sha256=" + hmac.new(
@@ -94,7 +96,11 @@ def _process_comment(comment):
     media_id = media.get("id")
     text = comment.get("text") or ""
 
-    if not comment_id or not media_id or not re.search(r"\blink\b", text, re.IGNORECASE):
+    if not comment_id or not media_id or not re.search(
+        r"\b(?:apply|link)\b",
+        text,
+        re.IGNORECASE,
+    ):
         return
 
     short_link = get_media_link(media_id)
