@@ -3,8 +3,9 @@ import io
 import re
 import requests
 
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
-from moviepy import ImageClip
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
+from moviepy import AudioFileClip, ImageClip, concatenate_videoclips
+from moviepy.audio.fx import AudioLoop
 
 # ============================================================
 # SETTINGS
@@ -12,7 +13,8 @@ from moviepy import ImageClip
 
 WIDTH = 1080
 HEIGHT = 1920
-DURATION = 3
+DURATION = 10
+SCENE_DURATION = 2.5
 OUTPUT_DIR = "output"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -208,6 +210,7 @@ def create_job_card(
     skills,
     output_path,
     ctc_source="not_available",
+    brand_image_path=None,
 ):
     image = Image.new("RGB", (WIDTH, HEIGHT), WHITE)
     draw = ImageDraw.Draw(image)
@@ -222,30 +225,48 @@ def create_job_card(
     image.paste(blob, (650, -150), blob)
     draw = ImageDraw.Draw(image)
 
-    # Logo
-    logo_path = os.path.join(OUTPUT_DIR, "company_logo.png")
-    logo = download_logo(company, logo_path)
+    logo = brand_image_path
+    if not logo:
+        logo_path = os.path.join(OUTPUT_DIR, "company_logo.png")
+        logo = download_logo(company, logo_path)
 
     if logo:
-        logo_img = Image.open(logo).convert("RGBA")
-        logo_x = (WIDTH - logo_img.width) // 2
-        logo_y = 130
-        padding = 35
+        try:
+            with Image.open(logo) as source:
+                logo_img = ImageOps.fit(
+                    source.convert("RGB"),
+                    (250, 250),
+                    method=Image.Resampling.LANCZOS,
+                ).convert("RGBA")
 
-        draw.rounded_rectangle(
-            (
-                logo_x - padding,
-                logo_y - padding,
-                logo_x + logo_img.width + padding,
-                logo_y + logo_img.height + padding,
-            ),
-            radius=35,
-            fill=WHITE,
-            outline=BORDER,
-            width=2,
-        )
-        image.paste(logo_img, (logo_x, logo_y), logo_img)
-    else:
+            logo_x = (WIDTH - logo_img.width) // 2
+            logo_y = 130
+            padding = 24
+            mask = Image.new("L", logo_img.size, 0)
+            ImageDraw.Draw(mask).rounded_rectangle(
+                (0, 0, logo_img.width - 1, logo_img.height - 1),
+                radius=42,
+                fill=255,
+            )
+
+            draw.rounded_rectangle(
+                (
+                    logo_x - padding,
+                    logo_y - padding,
+                    logo_x + logo_img.width + padding,
+                    logo_y + logo_img.height + padding,
+                ),
+                radius=52,
+                fill=WHITE,
+                outline=BORDER,
+                width=2,
+            )
+            image.paste(logo_img, (logo_x, logo_y), mask)
+        except (OSError, ValueError) as error:
+            print(f"⚠ Could not use supplied company image: {error}")
+            logo = None
+
+    if not logo:
         initial = str(company)[0].upper()
         circle = 220
         cx = (WIDTH - circle) // 2
@@ -307,7 +328,7 @@ def create_job_card(
         )
         center_text(
             draw,
-            str(ctc),
+            str(ctc).replace("₹", "INR "),
             card_top + 70,
             get_font(58, True),
             WHITE,
@@ -367,6 +388,128 @@ def create_job_card(
 
     image.save(output_path, quality=95)
     print(f"✓ Job card created: {output_path}")
+
+
+def create_reel_scene(
+    scene_number,
+    job_title,
+    company,
+    location,
+    ctc,
+    eligibility,
+    skills,
+    job_description,
+    brand_image_path=None,
+    comment_dm_enabled=False,
+):
+    image = Image.new("RGB", (WIDTH, HEIGHT), NAVY)
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, WIDTH, 20), fill=BLUE)
+    draw.ellipse((760, -280, 1260, 220), fill=(37, 99, 235))
+    draw.ellipse((-260, 1420, 250, 1930), fill=(124, 58, 237))
+
+    scene_label = f"JOB ALERT  /  {scene_number + 1:02d}"
+    draw.rounded_rectangle((72, 100, 420, 162), radius=28, fill=BLUE)
+    draw.text((102, 117), scene_label, font=get_font(25, True), fill=WHITE)
+
+    if scene_number == 0:
+        if brand_image_path and os.path.isfile(brand_image_path):
+            try:
+                with Image.open(brand_image_path) as source:
+                    cover = ImageOps.fit(
+                        source.convert("RGB"),
+                        (900, 610),
+                        method=Image.Resampling.LANCZOS,
+                    )
+                image.paste(cover, (90, 230))
+                draw = ImageDraw.Draw(image)
+                draw.rounded_rectangle(
+                    (90, 230, 990, 840),
+                    radius=38,
+                    outline=WHITE,
+                    width=3,
+                )
+            except (OSError, ValueError) as error:
+                print(f"⚠ Could not use supplied Reel image: {error}")
+
+        draw.text((82, 925), "HIRING NOW", font=get_font(34, True), fill=(147, 197, 253))
+        title_lines = wrap_text(draw, job_title, get_font(78, True), 900)
+        y = 1000
+        for line in title_lines[:2]:
+            draw.text((78, y), line, font=get_font(78, True), fill=WHITE)
+            y += 100
+        draw.text((84, y + 12), str(company), font=get_font(43, True), fill=(203, 213, 225))
+        draw.rounded_rectangle((72, 1555, 1008, 1660), radius=34, fill=(30, 41, 59))
+        draw.text((110, 1584), f"LOCATION  ·  {location}", font=get_font(35, True), fill=WHITE)
+        draw.text((82, 1770), "Watch for the role details  →", font=get_font(27), fill=(191, 219, 254))
+
+    elif scene_number == 1:
+        draw.text((82, 310), "THE ROLE", font=get_font(32, True), fill=(147, 197, 253))
+        title_lines = wrap_text(draw, job_title, get_font(67, True), 900)
+        y = 375
+        for line in title_lines[:3]:
+            draw.text((78, y), line, font=get_font(67, True), fill=WHITE)
+            y += 86
+
+        facts = [
+            ("COMPANY", company),
+            ("LOCATION", location),
+            ("COMPENSATION", str(ctc).replace("₹", "INR ") if ctc else ctc),
+        ]
+        y += 30
+        for label, value in facts:
+            draw.rounded_rectangle((72, y, 1008, y + 185), radius=32, fill=(30, 41, 59))
+            draw.text((112, y + 28), label, font=get_font(23, True), fill=(147, 197, 253))
+            lines = wrap_text(draw, value or "Not provided", get_font(38, True), 820)
+            for index, line in enumerate(lines[:2]):
+                draw.text((112, y + 76 + index * 47), line, font=get_font(38, True), fill=WHITE)
+            y += 215
+        draw.text((82, 1770), "Check the official careers page before applying.", font=get_font(25), fill=(203, 213, 225))
+
+    elif scene_number == 2:
+        draw.text((82, 310), "QUICK FIT CHECK", font=get_font(32, True), fill=(147, 197, 253))
+        draw.text((78, 390), "Could this role be for you?", font=get_font(52, True), fill=WHITE)
+
+        if eligibility:
+            draw.rounded_rectangle((72, 530, 1008, 790), radius=34, fill=(30, 41, 59))
+            draw.text((112, 568), "ELIGIBILITY", font=get_font(24, True), fill=(147, 197, 253))
+            lines = wrap_text(draw, eligibility, get_font(37, True), 820)
+            for index, line in enumerate(lines[:3]):
+                draw.text((112, 625 + index * 48), line, font=get_font(37, True), fill=WHITE)
+
+        if skills:
+            draw.rounded_rectangle((72, 830, 1008, 1170), radius=34, fill=(30, 41, 59))
+            draw.text((112, 870), "SKILLS MENTIONED", font=get_font(24, True), fill=(147, 197, 253))
+            lines = wrap_text(draw, skills, get_font(37, True), 820)
+            for index, line in enumerate(lines[:4]):
+                draw.text((112, 928 + index * 48), line, font=get_font(37, True), fill=WHITE)
+
+        description = job_description or "Review the role requirements and application details."
+        lines = wrap_text(draw, description, get_font(30), 850)
+        for index, line in enumerate(lines[:5]):
+            draw.text((92, 1270 + index * 48), line, font=get_font(30), fill=(203, 213, 225))
+        draw.text((82, 1770), "Save this Reel to check the details later.", font=get_font(27, True), fill=(203, 213, 225))
+
+    else:
+        draw.text((82, 380), "READY TO APPLY?", font=get_font(37, True), fill=(147, 197, 253))
+        title_lines = wrap_text(draw, job_title, get_font(65, True), 900)
+        y = 470
+        for line in title_lines[:2]:
+            draw.text((78, y), line, font=get_font(65, True), fill=WHITE)
+            y += 85
+        draw.text((82, y + 30), str(company), font=get_font(43, True), fill=(203, 213, 225))
+        draw.rounded_rectangle((72, 1120, 1008, 1320), radius=48, fill=BLUE)
+        draw.text((151, 1177), "COMMENT  LINK  BELOW", font=get_font(43, True), fill=WHITE)
+        dm_message = (
+            "Automated DM link is active"
+            if comment_dm_enabled
+            else "We’ll send the link by DM"
+        )
+        draw.text((140, 1240), dm_message, font=get_font(27, True), fill=WHITE)
+        draw.text((82, 1475), f"LOCATION  ·  {location}", font=get_font(33, True), fill=(203, 213, 225))
+        draw.text((82, 1770), "Follow for more job and internship updates.", font=get_font(26), fill=(203, 213, 225))
+
+    return image
 
 # ============================================================
 # CAPTION HELPERS
@@ -442,6 +585,7 @@ def get_company_tags(company):
         return []
     return [f"#{clean}", f"#{clean}jobs", f"#{clean}careers"]
 
+
 def create_caption(
     job_title,
     company,
@@ -454,41 +598,27 @@ def create_caption(
     output_path,
     application_link=None,
     ctc_source="not_available",
+    comment_dm_enabled=False,
 ):
-    tags = []
-    tags.extend(detect_category(job_title))
-    tags.extend(get_experience_tags(eligibility))
-    tags.extend(get_location_tags(location))
-    tags.extend(get_company_tags(company))
-    tags.extend(get_skill_tags(skills))
-
-    tags.extend([
-        "#hiring",
-        "#jobopening",
-        "#jobopportunity",
-        "#jobsearch",
-        "#careers",
-        "#jobhunt",
-        "#applynow",
-    ])
-
-    unique_tags = []
-    for tag in tags:
-        if tag.lower() not in [x.lower() for x in unique_tags]:
-            unique_tags.append(tag)
-
-    unique_tags = unique_tags[:20]
-    hashtag_text = " ".join(unique_tags)
+    tag_candidates = [
+        *detect_category(job_title)[:2],
+        *get_experience_tags(eligibility)[:1],
+        *get_location_tags(location)[:1],
+        *get_company_tags(company)[:1],
+    ]
+    hashtags = " ".join(dict.fromkeys(tag_candidates))
 
     ctc_label = "EST. CTC" if ctc_source == "estimated" else "CTC"
+    link_cta = (
+        "Comment LINK and we’ll automatically DM you the application link."
+        if comment_dm_enabled
+        else "Comment LINK to request the application link; we’ll send it by DM."
+    )
 
     sections = [
-        '💬 COMMENT "LINK" 👇',
-        "Get the application link in your DMs!",
+        f"🚨 {job_title} at {company} — {location}",
+        "New job opportunity for job seekers looking for this role and location.",
         "",
-        f"🚨 {job_title} @ {company}",
-        "",
-        f"📍 {location}",
     ]
 
     if ctc:
@@ -498,13 +628,13 @@ def create_caption(
         sections.append(f"🎓 Eligibility: {eligibility}")
 
     if job_description:
-        sections.extend(["", "💼 ABOUT THE ROLE", job_description])
+        sections.extend(["", "💼 ABOUT THE ROLE", job_description[:350].rstrip()])
 
     if company_description:
         sections.extend([
             "",
             f"🏢 ABOUT {str(company).upper()}",
-            company_description,
+            company_description[:250].rstrip(),
         ])
 
     if skills:
@@ -514,14 +644,15 @@ def create_caption(
         "",
         "🔥 Interested in this opportunity?",
         "",
-        "Comment **LINK** below and get the application details.",
+        link_cta,
+        "Please verify the vacancy and details on the employer’s official careers page.",
         "",
         "📌 Save this post so you don't miss the deadline.",
         "📤 Share it with a friend who's job hunting!",
         "",
-        f"🔎 {job_title} jobs | {company} careers | {location} jobs | hiring | tech careers | job opportunities",
+        f"🔎 Search: {job_title} jobs at {company} in {location}.",
         "",
-        hashtag_text,
+        hashtags,
     ])
 
     caption = "\n".join(sections)
@@ -536,12 +667,17 @@ def add_application_link_to_caption(caption_path, application_link):
     with open(caption_path, "r", encoding="utf-8") as file:
         lines = file.read().splitlines()
 
-    cta = "Comment **LINK** below and get the application details."
-    if cta not in lines:
+    cta_index = next(
+        (index for index, line in enumerate(lines) if line.startswith("Comment LINK")),
+        None,
+    )
+    if cta_index is None:
         raise ValueError("Could not find the application-link section in the caption.")
 
     lines = [line for line in lines if not line.startswith("🔗 Apply here:")]
-    cta_index = lines.index(cta)
+    cta_index = next(
+        index for index, line in enumerate(lines) if line.startswith("Comment LINK")
+    )
     lines[cta_index + 1:cta_index + 1] = [
         "",
         f"🔗 Apply here: {application_link}",
@@ -557,16 +693,45 @@ def add_application_link_to_caption(caption_path, application_link):
 # VIDEO
 # ============================================================
 
-def create_video(image_path, output_path):
-    clip = ImageClip(image_path).with_duration(DURATION)
-    clip.write_videofile(
-        output_path,
-        fps=30,
-        codec="libx264",
-        audio=False,
-        preset="medium",
-    )
-    clip.close()
+def create_video(
+    image_path,
+    output_path,
+    scene_images=None,
+    background_audio_path=None,
+):
+    image_paths = scene_images or [image_path]
+    clips = [
+        ImageClip(scene_path).with_duration(
+            SCENE_DURATION if scene_images else DURATION
+        )
+        for scene_path in image_paths
+    ]
+    final_clip = concatenate_videoclips(clips, method="compose")
+    audio_clip = None
+    source_audio = None
+    try:
+        if background_audio_path:
+            source_audio = AudioFileClip(background_audio_path)
+            audio_clip = AudioLoop(duration=final_clip.duration).apply(source_audio)
+            audio_clip = audio_clip.with_volume_scaled(0.10)
+            final_clip = final_clip.with_audio(audio_clip)
+
+        final_clip.write_videofile(
+            output_path,
+            fps=30,
+            codec="libx264",
+            audio=bool(background_audio_path),
+            audio_codec="aac" if background_audio_path else None,
+            preset="medium",
+        )
+    finally:
+        final_clip.close()
+        if audio_clip:
+            audio_clip.close()
+        if source_audio:
+            source_audio.close()
+        for clip in clips:
+            clip.close()
     print(f"✓ Video created: {output_path}")
 
 # ============================================================
@@ -584,6 +749,10 @@ def create_job_post(
     company_description=None,
     application_link=None,
     ctc_source="not_available",
+    brand_image_path=None,
+    job_id=None,
+    background_audio_path=None,
+    comment_dm_enabled=False,
 ):
     job_title = job_title or DISPLAY_DEFAULTS["job_title"]
     company = company or DISPLAY_DEFAULTS["company"]
@@ -594,7 +763,8 @@ def create_job_post(
 
     safe_company = re.sub(r"[^a-zA-Z0-9]+", "_", str(company)).strip("_") or "company"
     safe_role = re.sub(r"[^a-zA-Z0-9]+", "_", str(job_title)).strip("_") or "job"
-    prefix = f"{safe_company}_{safe_role}"
+    suffix = f"_{job_id}" if job_id else ""
+    prefix = f"{safe_company}_{safe_role}{suffix}"
 
     card_path = os.path.join(OUTPUT_DIR, f"{prefix}_card.png")
     video_path = os.path.join(OUTPUT_DIR, f"{prefix}_reel.mp4")
@@ -613,9 +783,37 @@ def create_job_post(
         skills=skills,
         output_path=card_path,
         ctc_source=ctc_source,
+        brand_image_path=brand_image_path,
     )
 
-    create_video(card_path, video_path)
+    scene_paths = []
+    for scene_number in range(4):
+        scene_path = os.path.join(OUTPUT_DIR, f"{prefix}_scene_{scene_number + 1}.png")
+        create_reel_scene(
+            scene_number=scene_number,
+            job_title=job_title,
+            company=company,
+            location=location,
+            ctc=ctc,
+            eligibility=eligibility,
+            skills=skills,
+            job_description=job_description,
+            brand_image_path=brand_image_path,
+            comment_dm_enabled=comment_dm_enabled,
+        ).save(scene_path)
+        scene_paths.append(scene_path)
+
+    try:
+        create_video(
+            card_path,
+            video_path,
+            scene_images=scene_paths,
+            background_audio_path=background_audio_path,
+        )
+    finally:
+        for scene_path in scene_paths:
+            if os.path.exists(scene_path):
+                os.remove(scene_path)
 
     caption = create_caption(
         job_title=job_title,
@@ -629,6 +827,7 @@ def create_job_post(
         output_path=caption_path,
         application_link=application_link,
         ctc_source=ctc_source,
+        comment_dm_enabled=comment_dm_enabled,
     )
 
     print("\n==========================================")

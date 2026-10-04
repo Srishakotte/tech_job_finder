@@ -170,6 +170,13 @@ def application(environ, start_response):
 
     signature = environ.get("HTTP_X_HUB_SIGNATURE_256", "")
     if not _is_valid_signature(body, signature, app_secret):
+        logger.warning(
+            "Rejected Instagram webhook signature "
+            "(signature_header_present=%s, sha256_prefix=%s, body_bytes=%s).",
+            bool(signature),
+            signature.startswith("sha256="),
+            len(body),
+        )
         return _response(start_response, "403 Forbidden", "Invalid webhook signature")
 
     try:
@@ -185,6 +192,18 @@ def application(environ, start_response):
         logger.exception("Could not queue Instagram webhook events.")
         return _response(start_response, "500 Internal Server Error", "Webhook processing failed")
 
+    entries = payload.get("entry", [])
+    comment_events = sum(
+        1
+        for entry in entries
+        for change in entry.get("changes", [])
+        if change.get("field") == "comments"
+    )
+    logger.info(
+        "Accepted Instagram webhook payload (entries=%d, comment_events=%d).",
+        len(entries),
+        comment_events,
+    )
     return _response(start_response, "200 OK", "EVENT_RECEIVED")
 
 
