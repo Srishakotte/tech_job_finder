@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: jobhunter-instagram-webhook
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements-webhook.txt
+    startCommand: gunicorn instagram_webhook:application --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 30
+    healthCheckPath: /health
+    disk:
+      name: instagram-webhook-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: INSTAGRAM_LINK_DB
+        value: /var/data/instagram_links.sqlite3
+      - key: INSTAGRAM_GRAPH_API_VERSION
+        value: v25.0
+      - key: INSTA_TOKEN
+        sync: false
+      - key: INSTAGRAM_USER_ID
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_WEBHOOK_VERIFY_TOKEN
+        sync: false
+      - key: WEBHOOK_ADMIN_TOKEN
+        sync: false
