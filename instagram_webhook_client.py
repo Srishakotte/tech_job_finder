@@ -11,10 +11,10 @@ load_dotenv()
 def register_published_media(media_id, short_link):
     base_url = os.getenv("INSTAGRAM_WEBHOOK_URL", "").rstrip("/")
     admin_token = os.getenv("WEBHOOK_ADMIN_TOKEN")
-    if not base_url or not admin_token:
-        raise RuntimeError(
-            "Set INSTAGRAM_WEBHOOK_URL and WEBHOOK_ADMIN_TOKEN in .env."
-        )
+    if not base_url:
+        raise RuntimeError("Set INSTAGRAM_WEBHOOK_URL in .env.")
+    if not admin_token:
+        raise RuntimeError("Set WEBHOOK_ADMIN_TOKEN in .env.")
 
     request = Request(
         f"{base_url}/admin/media",
