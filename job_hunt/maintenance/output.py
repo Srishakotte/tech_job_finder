@@ -1,9 +1,8 @@
 import stat
 import time
-from pathlib import Path
 
+from ..config import OUTPUT_DIR
 
-OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 MAX_AGE_SECONDS = 6 * 60 * 60
 
 

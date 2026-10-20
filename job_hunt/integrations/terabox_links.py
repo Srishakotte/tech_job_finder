@@ -5,9 +5,9 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from dotenv import load_dotenv
+from ..config import load_environment
 
-load_dotenv()
+load_environment()
 
 BASE_URL = "https://teraboxlinks.com"
 SESSION = requests.Session()

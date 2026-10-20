@@ -8,9 +8,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from dotenv import load_dotenv
+from ..config import load_environment
 
-load_dotenv()
+load_environment()
 
 GRAPH_API_VERSION = os.getenv("INSTAGRAM_GRAPH_API_VERSION", "v25.0")
 GRAPH_API_BASE = f"https://graph.instagram.com/{GRAPH_API_VERSION}"
