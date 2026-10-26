@@ -85,14 +85,16 @@ def format_job_preview(data):
         ctc = f"⚠️ EST. {ctc}"
 
     role_text = format_role(data.get("job_title"))
-
+    qualification = show(
+    data.get("eligibility") or "Bachelor's degree / B.Tech or equivalent"
+)
     return (
         "📋 JOB PREVIEW\n\n"
         f"Company: {show(data.get('company'))}\n"
         f"{role_text}\n"
         f"Location: {show(data.get('location') or 'India')}\n"
         f"CTC: {ctc}\n"
-        f"Qualification: {show(data.get('eligibility') or 'Bachelor\'s degree / B.Tech or equivalent')}\n"
+        f"Qualification: {qualification}\n"
         f"Experience: {show(data.get('experience') or 'Any')}\n"
         f"Skills: {show(data.get('skills'))}\n"
         f"Application: {show(data.get('application_link'), 'Not provided yet')}\n\n"
