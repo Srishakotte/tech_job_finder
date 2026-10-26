@@ -2,7 +2,7 @@ import colorsys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
@@ -16,6 +16,8 @@ from job_hunt.media.reel import (
     _concept_timeline,
     create_static_job_reel,
     create_template_previews,
+    pick_background_music,
+    resolve_background_music_path,
 )
 
 

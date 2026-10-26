@@ -65,8 +65,20 @@ SKILLS = [
 def clean(value):
     if value is None:
         return None
-    value = re.sub(r"\s+", " ", str(value)).strip()
-    return value.strip(" -:|•")
+    if isinstance(value, (list, tuple, set)):
+        cleaned = []
+        for item in value:
+            item_clean = clean(item)
+            if item_clean:
+                cleaned.append(item_clean)
+        return ", ".join(cleaned) if cleaned else None
+    value = str(value).strip()
+    if value in {"[]", "[ ]", "[", "]", "None", "null", "n/a", "na"}:
+        return None
+    value = re.sub(r"\s+", " ", value).strip()
+    value = value.replace("–", "-").replace("—", "-").replace("−", "-")
+    value = value.strip(" -:|•[]")
+    return value or None
 
 def is_ignored_url(url):
     try:
@@ -302,11 +314,11 @@ def parse_job_post(text):
 
     company = detect_company(text)
     job_title = detect_job_title(text)
-    location = detect_location(text)
+    location = detect_location(text) or "India"
     ctc, ctc_source = detect_ctc(text)
-    eligibility = detect_eligibility(text)
-    experience = detect_experience(text)
-    skills = detect_skills(text)
+    eligibility = detect_eligibility(text) or "Bachelor's degree / B.Tech or equivalent"
+    experience = detect_experience(text) or "Any"
+    skills = detect_skills(text) or []
     job_description = detect_description(text)
     company_description = detect_company_description(text)
 

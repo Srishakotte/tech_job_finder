@@ -1,6 +1,9 @@
 """Compatibility entry point for the standalone Reel-generation demo."""
 
+from job_hunt.config import load_environment
 from job_hunt.media.reel import create_job_post
+
+load_environment()
 
 
 def main():
