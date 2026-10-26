@@ -898,10 +898,11 @@ def create_caption(
 
     tag_candidates = [*detect_category(job_title)[:2], *get_location_tags(location)[:1], *get_company_tags(company)[:1]]
     hashtags = " ".join(dict.fromkeys(tag_candidates))
+    eligibility_text = eligibility or "Bachelor's degree / B.Tech or equivalent"
     caption_lines = [
         f"🚀 {job_title} at {company}",
         f"📍 {location or 'India'}",
-        f"🎓 {eligibility or "Bachelor's degree / B.Tech or equivalent"}",
+        f"🎓 {eligibility_text}",
         f"💼 {ctc or 'Salary not disclosed'}",
         "Scan the QR code or use the link to apply.",
         f"{application_link or 'Application link not available'}",
