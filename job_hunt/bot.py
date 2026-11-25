@@ -16,10 +16,13 @@ from telegram.ext import (
     filters,
 )
 
-from .config import load_environment
+from .config import comment_keyword, load_environment
+from .media.card import with_defaults
+from .integrations import link_store
 from .integrations.instagram import publish_reel
 from .integrations.terabox_links import create_short_link
 from .media.reel import create_job_post, create_static_job_reel
+from .maintenance.output import clean_expired_output, cleanup_output_files, prune_completed_outputs
 from .parsing.job_post import parse_job_post, apply_correction
 
 load_environment()
@@ -39,6 +42,29 @@ waiting_for_job_photo = set()
 waiting_for_job_audio = set()
 waiting_for_instagram_permission = set()
 publishing_instagram = set()
+
+
+def _pending_output_paths():
+    """Protect output files used by any pending Telegram approval/publish flow."""
+    keys = ("video_path", "caption_path", "card_path", "static_image_path", "brand_image_path", "background_audio_path")
+    return [
+        data.get(key)
+        for data in pending_jobs.values()
+        for key in keys
+        if data.get(key)
+    ]
+
+
+def _run_output_cleanup(*, startup=False):
+    try:
+        if startup:
+            removed = clean_expired_output()
+            logger.info("Output startup cleanup removed %d stale files/directories", removed)
+        else:
+            removed = prune_completed_outputs(protected_paths=_pending_output_paths())
+            logger.info("Output retention cleanup removed %d old job assets", removed)
+    except Exception:
+        logger.exception("Output cleanup failed; continuing without interrupting the bot")
 
 job_keyboard = InlineKeyboardMarkup([
     [
@@ -66,38 +92,35 @@ instagram_keyboard = InlineKeyboardMarkup([[
 ]])
 
 
+def card_ctc(data):
+    """Only print salaries the post actually states; estimates would look fake."""
+    return None if data.get("ctc_source") == "estimated" else data.get("ctc")
+
+
 def format_job_preview(data):
-    def show(value, fallback="Not detected"):
-        if value is None or value == "":
-            return fallback
-        if isinstance(value, list):
-            return ", ".join(str(x) for x in value) if value else fallback
-        return str(value)
+    values, defaulted = with_defaults({
+        "company": data.get("company"), "job_title": data.get("job_title"),
+        "location": data.get("location"), "ctc": card_ctc(data),
+        "eligibility": data.get("eligibility"), "experience": data.get("experience"),
+        "skills": data.get("skills"), "job_type": data.get("employment_type"),
+    })
 
-    def format_role(value):
-        text = show(value, "Role not detected")
-        if len(text.split()) <= 2:
-            return f"Role: {text}"
-        return text
+    def show(key, label):
+        mark = "  ⚠️ default" if key in defaulted else ""
+        return f"{label}: {values[key]}{mark}\n"
 
-    ctc = show(data.get("ctc"))
-    if data.get("ctc_source") == "estimated" and ctc != "Not detected":
-        ctc = f"⚠️ EST. {ctc}"
-
-    role_text = format_role(data.get("job_title"))
-    qualification = show(
-    data.get("eligibility") or "Bachelor's degree / B.Tech or equivalent"
-)
     return (
         "📋 JOB PREVIEW\n\n"
-        f"Company: {show(data.get('company'))}\n"
-        f"{role_text}\n"
-        f"Location: {show(data.get('location') or 'India')}\n"
-        f"CTC: {ctc}\n"
-        f"Qualification: {qualification}\n"
-        f"Experience: {show(data.get('experience') or 'Any')}\n"
-        f"Skills: {show(data.get('skills'))}\n"
-        f"Application: {show(data.get('application_link'), 'Not provided yet')}\n\n"
+        f"Company: {values['company'] or '❗ Not detected (please edit)'}\n"
+        + show("job_title", "Role")
+        + show("job_type", "Job type")
+        + show("location", "Location")
+        + show("ctc", "Salary")
+        + show("eligibility", "Qualification")
+        + show("experience", "Experience")
+        + f"Skills: {values['skills'] or '— (hidden on Reel)'}\n"
+        f"Application: {data.get('application_link') or 'Not provided yet'}\n\n"
+        "⚠️ default = not in the post, so a safe default will be shown on the Reel.\n"
         "Check the details, edit if needed, then confirm."
     )
 
@@ -114,9 +137,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text(
             "👋 Send me a complete job post.\n\n"
-            "I’ll parse it, let you edit the details, create a static job card, "
-            "turn that card into an MP4 Reel with optional licensed audio, send "
-            "the Reel and caption here, then ask before publishing to Instagram."
+            "I’ll parse it, let you edit the details, design an animated job Reel "
+            "(scan the QR or comment to get the link by DM), send it here for review, "
+            "then ask before publishing to Instagram."
         )
 
 
@@ -326,7 +349,7 @@ async def create_reel_and_send(message, user_id, data):
             company=data.get("company"),
             job_title=data.get("job_title"),
             location=data.get("location"),
-            ctc=data.get("ctc"),
+            ctc=card_ctc(data),
             eligibility=data.get("eligibility"),
             experience=data.get("experience"),
             skills=data.get("skills"),
@@ -350,7 +373,7 @@ async def create_reel_and_send(message, user_id, data):
                 job_title=data.get("job_title"),
                 company=data.get("company"),
                 location=data.get("location"),
-                ctc=data.get("ctc"),
+                ctc=card_ctc(data),
                 eligibility=data.get("eligibility"),
                 experience=data.get("experience"),
                 skills=data.get("skills"),
@@ -365,6 +388,8 @@ async def create_reel_and_send(message, user_id, data):
                 demo_mode=False,
                 reel_style="reference",
                 static_image_path=static_path,
+                job_type=data.get("employment_type"),
+                logo_hint_url=data.get("application_link"),
             )
         except RuntimeError as exc:
             if "Could not download a logo" not in str(exc):
@@ -375,7 +400,7 @@ async def create_reel_and_send(message, user_id, data):
                 job_title=data.get("job_title"),
                 company=data.get("company"),
                 location=data.get("location"),
-                ctc=data.get("ctc"),
+                ctc=card_ctc(data),
                 eligibility=data.get("eligibility"),
                 experience=data.get("experience"),
                 skills=data.get("skills"),
@@ -390,6 +415,8 @@ async def create_reel_and_send(message, user_id, data):
                 demo_mode=False,
                 reel_style="reference",
                 static_image_path=static_path,
+                job_type=data.get("employment_type"),
+                logo_hint_url=data.get("application_link"),
             )
 
         video_path = result.get("video")
@@ -401,6 +428,8 @@ async def create_reel_and_send(message, user_id, data):
 
         data["video_path"] = video_path
         data["caption_path"] = caption_path
+        data["card_path"] = result.get("card")
+        data["cover_offset_ms"] = result.get("cover_offset_ms")
         data["application_link_confirmation_complete"] = True
         data["job_creation_complete"] = True
         pending_captions[user_id] = caption_path
@@ -411,6 +440,16 @@ async def create_reel_and_send(message, user_id, data):
             caption="🎬 Your job Reel is ready. Review it before publishing.",
             supports_streaming=True,
         )
+        # The generated MP4 now contains the selected logo/audio. Remove duplicate
+        # preview imagery and user-supplied source assets only after Telegram accepted
+        # the final video. Keep the final card, MP4, and caption for approval/retry.
+        final_card_path = result.get("card")
+        if static_path and final_card_path and os.path.abspath(static_path) != os.path.abspath(final_card_path):
+            cleanup_output_files([static_path])
+        cleanup_output_files([data.get("brand_image_path"), data.get("background_audio_path")])
+        data.pop("brand_image_path", None)
+        data.pop("background_audio_path", None)
+        _run_output_cleanup(startup=False)
         with open(caption_path, "r", encoding="utf-8") as handle:
             caption_text = handle.read().strip()
         await message.reply_document(
@@ -461,17 +500,41 @@ async def publish_reel_to_instagram(query, user_id):
         await query.message.reply_text("⏳ Uploading the MP4 and publishing to Instagram...")
         with open(caption_path, "r", encoding="utf-8") as handle:
             caption = handle.read().strip()
-        result = await asyncio.to_thread(publish_reel, video_path, caption)
+        result = await asyncio.to_thread(
+            publish_reel, video_path, caption, cover_offset_ms=data.get("cover_offset_ms"),
+        )
         media_id = result.get("media_id")
         if not media_id:
             raise RuntimeError("Instagram did not return a published media ID.")
         data["instagram_media_id"] = media_id
         text = f"✅ Reel published to Instagram!\nMedia ID: {media_id}"
+        keyword = comment_keyword()
+        if keyword and data.get("short_application_link"):
+            try:
+                await asyncio.to_thread(
+                    link_store.save_media_link, media_id, data["short_application_link"],
+                    role=data.get("job_title"), company=data.get("company"),
+                    original_link=data.get("application_link"),
+                )
+                text += f"\n💬 Comment-to-DM is live: anyone who comments gets the link by DM."
+            except Exception as exc:
+                logger.exception("Could not save media link for comment-to-DM")
+                text += f"\n⚠️ Comment-to-DM will fall back to the caption link ({exc})."
         if result.get("permalink"):
             text += f"\n🔗 {result['permalink']}"
         if result.get("cleanup_error"):
             text += "\n⚠️ Published, but temporary Cloudinary cleanup failed: " + str(result["cleanup_error"])
         await query.message.reply_text(text)
+        # No local archive is needed: once Instagram confirms publication, delete
+        # the final files. Telegram already has the Reel, and it can be regenerated.
+        cleanup_output_files([
+            video_path,
+            caption_path,
+            data.get("card_path"),
+            data.get("static_image_path"),
+            data.get("brand_image_path"),
+            data.get("background_audio_path"),
+        ])
         pending_jobs.pop(user_id, None)
         pending_captions.pop(user_id, None)
         waiting_for_instagram_permission.discard(user_id)
@@ -509,11 +572,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await publish_reel_to_instagram(query, user_id)
         return
     if action == "cancel_instagram_publish":
+        cancelled_data = pending_jobs.get(user_id, {})
+        cleanup_output_files([
+            cancelled_data.get("video_path"),
+            cancelled_data.get("caption_path"),
+            cancelled_data.get("card_path"),
+            cancelled_data.get("static_image_path"),
+            cancelled_data.get("brand_image_path"),
+            cancelled_data.get("background_audio_path"),
+        ])
         waiting_for_instagram_permission.discard(user_id)
         pending_jobs.pop(user_id, None)
         pending_captions.pop(user_id, None)
         waiting_for_application_link.discard(user_id)
-        await query.message.reply_text("❎ Instagram publishing cancelled. The Reel and caption were already sent here.")
+        await query.message.reply_text("❎ Publishing cancelled. Local generated files were removed; the Reel remains in this Telegram chat if you need to review it.")
         return
 
     data = pending_jobs.get(user_id)
@@ -591,7 +663,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    logging.basicConfig(level=logging.WARNING, format="%(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     for noisy_logger in [
         "telegram",
         "telegram.ext",
@@ -604,15 +676,23 @@ def main():
 
     print("Bot ready. Send a job post to the Telegram bot and confirm the Reel before publishing.")
     os.makedirs("output", exist_ok=True)
-    app = (
+    _run_output_cleanup(startup=True)
+    # Local development defaults to polling. On Render, set TELEGRAM_MODE=webhook
+    # and configure WEBHOOK_PATH and WEBHOOK_SECRET (Render sets RENDER_EXTERNAL_URL).
+    telegram_mode = os.getenv("TELEGRAM_MODE", "polling").strip().lower()
+    if telegram_mode not in {"polling", "webhook"}:
+        raise RuntimeError("TELEGRAM_MODE must be either 'polling' or 'webhook'.")
+    builder = (
         Application.builder()
         .token(TOKEN)
         .connect_timeout(30)
         .read_timeout(60)
         .write_timeout(60)
         .pool_timeout(30)
-        .build()
     )
+    if telegram_mode == "webhook":
+        builder = builder.updater(None)
+    app = builder.build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("post", post_command))
     app.add_handler(CallbackQueryHandler(button_handler))
@@ -620,36 +700,13 @@ def main():
     app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE | filters.Document.AUDIO, handle_audio))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Local development defaults to polling. On Render, set TELEGRAM_MODE=webhook
-    # and configure RENDER_EXTERNAL_URL, WEBHOOK_PATH, and WEBHOOK_SECRET.
-    telegram_mode = os.getenv("TELEGRAM_MODE", "polling").strip().lower()
+    # Telegram + the Instagram comment-to-DM webhook share one process and port.
+    from .server import run
 
-    if telegram_mode == "webhook":
-        base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
-        webhook_path = os.getenv("WEBHOOK_PATH", "").strip().strip("/")
-        webhook_secret = os.getenv("WEBHOOK_SECRET", "").strip()
-
-        if not base_url or not webhook_path or not webhook_secret:
-            raise RuntimeError(
-                "Webhook mode requires RENDER_EXTERNAL_URL, WEBHOOK_PATH, "
-                "and WEBHOOK_SECRET to be configured."
-            )
-
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=int(os.getenv("PORT", "10000")),
-            url_path=webhook_path,
-            webhook_url=f"{base_url}/{webhook_path}",
-            secret_token=webhook_secret,
-            allowed_updates=Update.ALL_TYPES,
-        )
-    elif telegram_mode == "polling":
-        # Use polling for local testing; no public webhook URL is needed.
-        app.run_polling(allowed_updates=Update.ALL_TYPES)
-    else:
-        raise RuntimeError(
-            "TELEGRAM_MODE must be either 'polling' or 'webhook'."
-        )
+    try:
+        asyncio.run(run(app, telegram_mode))
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

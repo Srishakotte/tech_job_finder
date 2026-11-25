@@ -179,7 +179,7 @@ def _wait_for_container(container_id, access_token):
     )
 
 
-def publish_reel(video_path, caption):
+def publish_reel(video_path, caption, cover_offset_ms=None):
     access_token = _required_config("INSTA_TOKEN")
     instagram_user_id = _required_config("INSTAGRAM_USER_ID")
     if len(caption) > 2200:
@@ -200,6 +200,8 @@ def publish_reel(video_path, caption):
                 "caption": caption,
                 "share_to_feed": "true",
                 "access_token": access_token,
+                # Use a fully-animated-in frame as the cover, not the empty first frame.
+                **({"thumb_offset": str(int(cover_offset_ms))} if cover_offset_ms else {}),
             },
         )
         container_id = container.get("id")
@@ -223,7 +225,13 @@ def publish_reel(video_path, caption):
         except Exception as error:
             cleanup_error = str(error)
 
+    permalink = None
+    try:
+        permalink = _graph_get(media_id, {"fields": "permalink", "access_token": access_token}).get("permalink")
+    except Exception:
+        pass
     return {
         "media_id": media_id,
+        "permalink": permalink,
         "cleanup_error": cleanup_error,
     }

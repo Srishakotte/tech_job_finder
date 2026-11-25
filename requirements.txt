@@ -7,3 +7,4 @@ python-dotenv>=1,<2
 python-telegram-bot[webhooks]>=22,<23
 qrcode[pil]>=8.2,<9
 requests>=2.32,<3
+pymongo>=4.10,<5

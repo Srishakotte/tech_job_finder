@@ -1,0 +1,54 @@
+# Render Blueprint: Dashboard > New > Blueprint > pick this repo.
+# Secrets marked sync: false are entered in the Render dashboard.
+services:
+  - type: web
+    name: job-hunt-bot
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: TELEGRAM_MODE
+        value: webhook
+      - key: WEBHOOK_PATH
+        value: telegram-webhook
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: META_WEBHOOK_VERIFY_TOKEN
+        generateValue: true
+      - key: COMMENT_TO_DM_ENABLED
+        value: "true"
+      - key: COMMENT_KEYWORD
+        value: LINK
+      - key: COMMENT_DM_TRIGGER
+        value: any
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TERABOXLINKS_USERNAME
+        sync: false
+      - key: TERABOXLINKS_PASSWORD
+        sync: false
+      - key: INSTA_TOKEN
+        sync: false
+      - key: INSTAGRAM_USER_ID
+        sync: false
+      - key: INSTAGRAM_USERNAME
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: BRAND_HANDLE
+        sync: false
+      - key: LOGO_DEV_TOKEN
+        sync: false

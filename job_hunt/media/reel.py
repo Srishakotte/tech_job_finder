@@ -2,23 +2,33 @@ import os
 import io
 import re
 import random
+import tempfile
+import gc
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
-import numpy as np
 import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from moviepy import AudioFileClip, CompositeVideoClip, ImageClip, VideoClip
 from moviepy.audio.fx import AudioLoop
 
 from .background import BrandTheme, animated_background_frame, create_brand_theme
+from .caption import build_caption
+from .card import render_card_layers
+from .motion import COVER_SECONDS, DURATION as MOTION_DURATION, FPS as MOTION_FPS, build_frame_function
 from .qr_code import generate_qr_code
-from ..config import OUTPUT_DIR
+from ..config import OUTPUT_DIR, comment_keyword, env_flag
+from ..maintenance.output import cleanup_output_files
 
 WIDTH = 1080
 HEIGHT = 1920
+# The artwork stays full-size on disk, but video encoding uses a smaller raster
+# to keep peak RAM within Render Free's 512 MB limit.
+RENDER_WIDTH = 720
+RENDER_HEIGHT = 1280
+RENDER_FPS = 24
 # Static job-card Reels are always exactly five seconds.
-REEL_DURATION_SECONDS = 5
+REEL_DURATION_SECONDS = int(os.getenv("REEL_STATIC_SECONDS", "7"))
 APPROVED_REEL_HOLD_SECONDS = REEL_DURATION_SECONDS
 DEFAULT_BACKGROUND_VOLUME = 0.20
 MUSIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "music"))
@@ -158,95 +168,133 @@ def pick_background_music(music_dir=MUSIC_DIR):
     return resolve_background_music_path(music_dir=music_dir)
 
 
+_KNOWN_DOMAINS = {
+    "microsoft": "microsoft.com",
+    "google": "google.com",
+    "amazon": "amazon.com",
+    "apple": "apple.com",
+    "meta": "meta.com",
+    "netflix": "netflix.com",
+    "adobe": "adobe.com",
+    "salesforce": "salesforce.com",
+    "oracle": "oracle.com",
+    "servicenow": "servicenow.com",
+    "deloitte": "deloitte.com",
+    "accenture": "accenture.com",
+    "infosys": "infosys.com",
+    "tcs": "tcs.com",
+    "wipro": "wipro.com",
+    "flipkart": "flipkart.com",
+    "swiggy": "swiggy.com",
+    "zomato": "zomato.com",
+    "uber": "uber.com",
+    "atlassian": "atlassian.com",
+    "nvidia": "nvidia.com",
+    "visa": "visa.com",
+    "mastercard": "mastercard.com",
+    "deshaw": "deshaw.com",
+    "goldman sachs": "goldmansachs.com",
+    "morgan stanley": "morganstanley.com",
+    "jpmorgan": "jpmorgan.com",
+    "jp morgan": "jpmorgan.com",
+    "qualcomm": "qualcomm.com",
+    "intel": "intel.com",
+    "cisco": "cisco.com",
+    "ibm": "ibm.com",
+    "sap": "sap.com",
+    "paypal": "paypal.com",
+    "stripe": "stripe.com",
+}
+
+
 def get_company_domain(company):
     key = str(company).lower().strip()
-    known = {
-        "microsoft": "microsoft.com",
-        "google": "google.com",
-        "amazon": "amazon.com",
-        "apple": "apple.com",
-        "meta": "meta.com",
-        "netflix": "netflix.com",
-        "adobe": "adobe.com",
-        "salesforce": "salesforce.com",
-        "oracle": "oracle.com",
-        "servicenow": "servicenow.com",
-        "deloitte": "deloitte.com",
-        "accenture": "accenture.com",
-        "infosys": "infosys.com",
-        "tcs": "tcs.com",
-        "wipro": "wipro.com",
-        "flipkart": "flipkart.com",
-        "swiggy": "swiggy.com",
-        "zomato": "zomato.com",
-        "uber": "uber.com",
-        "atlassian": "atlassian.com",
-        "nvidia": "nvidia.com",
-        "visa": "visa.com",
-        "mastercard": "mastercard.com",
-        "deshaw": "deshaw.com",
-        "goldman sachs": "goldmansachs.com",
-        "morgan stanley": "morganstanley.com",
-        "jpmorgan": "jpmorgan.com",
-        "jp morgan": "jpmorgan.com",
-        "qualcomm": "qualcomm.com",
-        "intel": "intel.com",
-        "cisco": "cisco.com",
-        "ibm": "ibm.com",
-        "sap": "sap.com",
-        "paypal": "paypal.com",
-        "stripe": "stripe.com",
-    }
+    known = _KNOWN_DOMAINS
     if key in known:
         return known[key]
     cleaned = re.sub(r"[^a-z0-9]", "", key)
     return (cleaned or "example") + ".com"
 
 
-def download_logo(company, output_path):
-    """Try Logo.dev first, log the result, then fall back to Google's favicon."""
-    domain = get_company_domain(company)
-    logo_dev_token = os.getenv("LOGO_DEV_TOKEN", "").strip()
-    print(f"[LOGO] company={company} domain={domain} token_loaded={bool(logo_dev_token)}")
-    urls = []
-    if logo_dev_token:
-        urls.append(("Logo.dev", f"https://img.logo.dev/{domain}", {
-            "token": logo_dev_token, "size": 512, "format": "png"
-        }))
-    else:
-        print("[LOGO] LOGO_DEV_TOKEN is missing/empty; skipping Logo.dev and trying Google favicon.")
-    urls.append(("Google favicon", f"https://www.google.com/s2/favicons", {
-        "domain": domain, "sz": 256
-    }))
+# Hosts that are job boards, ATS platforms or shorteners: their logo is not the employer's.
+_NON_EMPLOYER_HOSTS = (
+    "linkedin.", "naukri.", "indeed.", "glassdoor.", "foundit.", "monster.", "instahyre.",
+    "internshala.", "unstop.", "wellfound.", "angel.co", "cutshort.", "hirist.", "iimjobs.",
+    "myworkdayjobs.", "workday.", "greenhouse.io", "lever.co", "smartrecruiters.", "icims.",
+    "taleo.", "successfactors.", "oraclecloud.", "jobvite.", "ashbyhq.", "recruitee.",
+    "zohorecruit.", "freshteam.", "keka.", "darwinbox.", "breezy.hr", "bamboohr.",
+    "google.com", "forms.gle", "bit.ly", "tinyurl.", "t.co", "lnkd.in", "cutt.ly", "rb.gy",
+    "terabox", "shorturl.", "is.gd", "telegram.", "whatsapp.",
+)
+_SECOND_LEVEL = {"co", "com", "net", "org", "ac", "gov", "edu"}
 
-    for provider, url, params in urls:
+
+def employer_domain_from_link(link):
+    """careers.deloitte.com/... -> deloitte.com; None for job boards/ATS/shorteners."""
+    try:
+        host = (urlparse(str(link)).hostname or "").lower()
+    except ValueError:
+        return None
+    if not host or any(marker in host for marker in _NON_EMPLOYER_HOSTS):
+        return None
+    parts = host.split(".")
+    if len(parts) >= 3 and parts[-2] in _SECOND_LEVEL:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:]) if len(parts) >= 2 else None
+
+
+def _logo_name_variants(company):
+    name = re.sub(r"\s+", " ", str(company or "")).strip()
+    short = re.sub(r"(?i)\b(pvt|private|ltd|limited|inc|llp|llc|corp(oration)?|india|global|"
+                   r"solutions|services|group|co)\b\.?", "", name)
+    short = re.sub(r"\s+", " ", short).strip(" ,.-")
+    return [n for n in dict.fromkeys([name, short]) if n]
+
+
+def download_logo(company, output_path, application_link=None):
+    """Find the real company logo.
+
+    Order: employer domain from the original apply link -> known domain map ->
+    Logo.dev lookup by company *name* -> Logo.dev guessed domain -> Google favicon.
+    """
+    token = os.getenv("LOGO_DEV_TOKEN", "").strip()
+    link_domain = employer_domain_from_link(application_link) if application_link else None
+    key = str(company or "").lower().strip()
+    guessed = get_company_domain(company)
+    attempts = []
+    if token:
+        base = {"token": token, "size": 512, "format": "png", "fallback": "404"}
+        if link_domain:
+            attempts.append(("Logo.dev (apply-link domain)", f"https://img.logo.dev/{link_domain}", base))
+        if guessed and key in _KNOWN_DOMAINS:
+            attempts.append(("Logo.dev (known domain)", f"https://img.logo.dev/{guessed}", base))
+        for name in _logo_name_variants(company):
+            attempts.append((f"Logo.dev (name '{name}')", f"https://img.logo.dev/name/{quote(name)}", base))
+        attempts.append(("Logo.dev (guessed domain)", f"https://img.logo.dev/{guessed}", base))
+    else:
+        print("[LOGO] LOGO_DEV_TOKEN is missing; only the low-resolution favicon fallback is available.")
+    attempts.append(("Google favicon", "https://www.google.com/s2/favicons",
+                     {"domain": link_domain or guessed, "sz": 256}))
+
+    for provider, url, params in attempts:
         try:
-            response = requests.get(url, params=params, timeout=12,
-                                    headers={"User-Agent": "Mozilla/5.0"})
+            response = requests.get(url, params=params, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
             if response.status_code != 200:
-                print(f"[LOGO] {provider} failed for {domain}: HTTP {response.status_code}")
                 continue
-            try:
-                image = Image.open(io.BytesIO(response.content)).convert("RGBA")
-                image.load()
-            except Exception as exc:
-                print(f"[LOGO] {provider} returned non-image data for {domain}: {exc}")
-                continue
-            if image.width < 20 or image.height < 20:
-                print(f"[LOGO] {provider} returned a tiny image for {domain}; trying fallback.")
+            image = Image.open(io.BytesIO(response.content)).convert("RGBA")
+            image.load()
+            if image.width < 32 or image.height < 32:
                 continue
             bbox = image.getbbox()
             if bbox:
                 image = image.crop(bbox)
-            image.thumbnail((280, 280), Image.Resampling.LANCZOS)
-            parent = os.path.dirname(os.path.abspath(output_path))
-            os.makedirs(parent, exist_ok=True)
+            image.thumbnail((400, 400), Image.Resampling.LANCZOS)
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
             image.save(output_path)
-            print(f"[LOGO] Success: loaded {domain} logo from {provider} ({image.width}x{image.height}).")
+            print(f"[LOGO] {company}: using {provider} ({image.width}x{image.height}).")
             return output_path
         except Exception as exc:
-            print(f"[LOGO] {provider} request failed for {domain}: {type(exc).__name__}: {exc}")
-    print(f"[LOGO] All logo providers failed for {company} ({domain}). Check network, LOGO_DEV_TOKEN, and remote provider availability.")
+            print(f"[LOGO] {provider} failed for {company}: {type(exc).__name__}")
     raise RuntimeError(f"Could not download a logo for {company}; check network and LOGO_DEV_TOKEN.")
 
 
@@ -354,7 +402,33 @@ def _find_job_card_background():
     return None
 
 
+def _render_layers(company, job_title, location, ctc, eligibility, experience, skills,
+                   application_link=None, brand_image_path=None, job_type=None):
+    return render_card_layers(
+        company=company, job_title=job_title, location=location, ctc=ctc,
+        eligibility=eligibility, experience=experience, skills=skills,
+        application_link=application_link, brand_image_path=brand_image_path,
+        job_type=job_type, comment_keyword=comment_keyword(),
+    )
+
+
 def _create_static_card(
+    company, job_title, location, ctc, eligibility, experience, skills,
+    application_link, brand_image_path=None, job_id=None, posted_on=None,
+    job_type=None, tagline="CAREER OPPORTUNITY", role_note=None, location_note=None,
+    ctc_note=None, experience_note=None, canvas_height=1920,
+    promotional_text=None,
+):
+    """Flattened 1080x1920 card (QR + "comment KEYWORD" call to action)."""
+    layers = _render_layers(company, job_title, location, ctc, eligibility, experience,
+                            skills, application_link, brand_image_path, job_type)
+    try:
+        return layers.flatten()
+    finally:
+        layers.close()
+
+
+def _create_static_card_legacy(
     company, job_title, location, ctc, eligibility, experience, skills,
     application_link, brand_image_path=None, job_id=None, posted_on=None,
     job_type=None, tagline="CAREER OPPORTUNITY", role_note=None, location_note=None,
@@ -441,7 +515,13 @@ def _create_static_card(
             t = (gx - x1) / max(1, x2 - x1 - 1)
             color = tuple(round(company_brand[i] * (1 - t) + brand_deeper[i] * t) for i in range(3))
             gd.line((gx, y1, gx, y2), fill=color)
-        image.paste(gradient, (0, 0), mask)
+        try:
+            image.paste(gradient, (0, 0), mask)
+        finally:
+            md = None
+            gd = None
+            mask.close()
+            gradient.close()
 
     company_text = clean(company)
     role_title = clean(job_title)
@@ -461,16 +541,26 @@ def _create_static_card(
     logo_path = str(brand_image_path) if brand_image_path and os.path.isfile(str(brand_image_path)) else None
     logo_drawn = False
     if logo_path:
+        logo = None
         try:
-            logo = Image.open(logo_path).convert("RGBA")
+            with Image.open(logo_path) as source_logo:
+                logo = source_logo.convert("RGBA")
             alpha = logo.getchannel("A")
             bbox = alpha.getbbox()
             if bbox:
-                logo = logo.crop(bbox)
+                cropped = logo.crop(bbox)
+                logo.close()
+                logo = cropped
             else:
-                bbox = ImageOps.invert(logo.convert("RGB").convert("L")).getbbox()
+                grayscale = logo.convert("RGB").convert("L")
+                try:
+                    bbox = ImageOps.invert(grayscale).getbbox()
+                finally:
+                    grayscale.close()
                 if bbox:
-                    logo = logo.crop(bbox)
+                    cropped = logo.crop(bbox)
+                    logo.close()
+                    logo = cropped
             logo.thumbnail((300, 150), Image.Resampling.LANCZOS)
             lx = (width - logo.width) // 2
             ly = logo_y + (150 - logo.height) // 2
@@ -479,6 +569,9 @@ def _create_static_card(
             logo_drawn = True
         except Exception:
             logo_path = None
+        finally:
+            if logo is not None:
+                logo.close()
 
     # Centered initials tile fallback when no real company logo can be fetched.
     if not logo_drawn and company_text:
@@ -674,7 +767,8 @@ def create_static_job_reel(
     if output_path is None:
         safe_company = re.sub(r"[^a-zA-Z0-9]+", "_", company).strip("_") or "company"
         safe_role = re.sub(r"[^a-zA-Z0-9]+", "_", job_title).strip("_") or "job"
-        output_path = os.path.join(OUTPUT_DIR, f"{safe_company}_{safe_role}_static_reel.png")
+        job_suffix = f"_{job_id}" if job_id else ""
+        output_path = os.path.join(OUTPUT_DIR, f"{safe_company}_{safe_role}{job_suffix}_static_reel.png")
     image = _create_static_card(
         company=company,
         job_title=job_title,
@@ -697,7 +791,11 @@ def create_static_job_reel(
         promotional_text=promotional_text,
     )
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    image.convert("RGB").save(output_path, format="PNG", optimize=True)
+    try:
+        # _create_static_card returns RGB, so avoid allocating a second full-size image.
+        image.save(output_path, format="PNG", optimize=True)
+    finally:
+        image.close()
     return output_path
 
 
@@ -713,19 +811,54 @@ def create_video(
     background_volume=DEFAULT_BACKGROUND_VOLUME,
     music_dir=MUSIC_DIR,
     include_qr_end_card=False,
+    layers=None,
 ):
-    theme = theme or BrandTheme(BLUE, PURPLE, 0)
-    bg = Image.new("RGB", (WIDTH, HEIGHT), (8, 15, 28))
-    background_clip = VideoClip(
-        frame_function=lambda t: np.asarray(bg),
-        duration=REEL_DURATION_SECONDS,
-    ).resized((WIDTH, HEIGHT))
-    image_clip = ImageClip(image_path, transparent=False).with_duration(REEL_DURATION_SECONDS)
-    clips = [background_clip, image_clip]
-    final_clip = CompositeVideoClip(clips, size=(WIDTH, HEIGHT)).with_duration(REEL_DURATION_SECONDS)
+    """Encode the full-frame static card with a lower-memory rendering pipeline.
+
+    The source card remains full resolution on disk. A temporary 720x1280 copy is
+    used for encoding, avoiding a 1080x1920 MoviePy composite/background clip.
+    The output is a static five-second Reel, so 24 fps is sufficient and keeps the
+    encoded frame count down while remaining a conventional video frame rate.
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    render_fd, render_image_path = tempfile.mkstemp(
+        prefix="render_", suffix=".png", dir=str(OUTPUT_DIR)
+    )
+    os.close(render_fd)
+
+    source_rgb = None
+    resized_image = None
+    image_clip = None
+    final_clip = None
     audio_clip = None
     source_audio = None
     try:
+        # A static Reel is one still frame, so full 1080x1920 is cheap and keeps
+        # text crisp. Only the animated version is downscaled to save RAM.
+        with Image.open(image_path) as source_image:
+            source_rgb = source_image.convert("RGB")
+        static_size = (WIDTH, HEIGHT) if env_flag("REEL_STATIC_FULL_RES", True) else (RENDER_WIDTH, RENDER_HEIGHT)
+        resized_image = source_rgb.resize(
+            (RENDER_WIDTH, RENDER_HEIGHT) if layers is not None and env_flag("REEL_MOTION", False) else static_size,
+            Image.Resampling.LANCZOS,
+        )
+        resized_image.save(render_image_path, format="PNG", optimize=False)
+        resized_image.close()
+        resized_image = None
+        source_rgb.close()
+        source_rgb = None
+
+        animated = layers is not None and env_flag("REEL_MOTION", False)
+        duration = MOTION_DURATION if animated else REEL_DURATION_SECONDS
+        if animated:
+            image_clip = VideoClip(frame_function=build_frame_function(layers, duration),
+                                   duration=duration)
+        else:
+            image_clip = ImageClip(render_image_path, transparent=False).with_duration(duration)
+        # The image itself covers the whole frame; a background clip and a
+        # CompositeVideoClip were redundant and created additional frame buffers.
+        final_clip = image_clip
+
         if background_audio_path:
             source_audio = AudioFileClip(background_audio_path)
             audio_clip = source_audio
@@ -733,7 +866,7 @@ def create_video(
                 audio_clip = AudioLoop(duration=final_clip.duration).apply(source_audio)
             elif source_audio.duration > final_clip.duration:
                 audio_clip = _audio_subclip(source_audio, 0, final_clip.duration)
-            audio_clip = audio_clip.with_volume_scaled(background_volume)
+            audio_clip = _fade_audio(audio_clip.with_volume_scaled(background_volume))
             final_clip = final_clip.with_audio(audio_clip)
         elif music_dir:
             music_path = resolve_background_music_path(music_dir=music_dir)
@@ -743,28 +876,62 @@ def create_video(
                     audio_clip = AudioLoop(duration=final_clip.duration).apply(source_audio)
                 elif source_audio.duration > final_clip.duration:
                     audio_clip = _audio_subclip(source_audio, 0, final_clip.duration)
-                audio_clip = audio_clip.with_volume_scaled(background_volume)
+                else:
+                    audio_clip = source_audio
+                audio_clip = _fade_audio(audio_clip.with_volume_scaled(background_volume))
                 final_clip = final_clip.with_audio(audio_clip)
+
         final_clip.write_videofile(
             output_path,
-            fps=30,
+            fps=MOTION_FPS if animated else RENDER_FPS,
             codec="libx264",
             audio=bool(audio_clip),
+            audio_fps=22050,
             audio_codec="aac" if audio_clip else None,
-            preset="medium",
+            audio_nbytes=2,
+            preset=os.getenv("REEL_X264_PRESET", "veryfast"),
+            threads=1,
+            ffmpeg_params=["-crf", "22", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-threads", "1"],
         )
         actual_duration = float(getattr(final_clip, "duration", 0) or 0)
-        print(f"[REEL] Wrote {output_path}; expected duration={REEL_DURATION_SECONDS}s, timeline duration={actual_duration:.3f}s")
-        if abs(actual_duration - REEL_DURATION_SECONDS) > 0.05:
-            raise RuntimeError(f"Reel duration mismatch: expected {REEL_DURATION_SECONDS}s, got {actual_duration:.3f}s")
+        print(
+            f"[REEL] Wrote {output_path}; resolution={image_clip.w}x{image_clip.h}, "
+            f"animated={animated}, expected duration={duration}s, "
+            f"timeline duration={actual_duration:.3f}s"
+        )
+        if abs(actual_duration - duration) > 0.05:
+            raise RuntimeError(
+                f"Reel duration mismatch: expected {duration}s, "
+                f"got {actual_duration:.3f}s"
+            )
     finally:
-        final_clip.close()
-        image_clip.close()
-        background_clip.close()
-        if audio_clip:
-            audio_clip.close()
-        if source_audio:
-            source_audio.close()
+        # Close unique clips only once. This is important for FFmpeg audio readers.
+        seen_clip_ids = set()
+        for clip in (final_clip, image_clip, audio_clip, source_audio):
+            if clip is None or id(clip) in seen_clip_ids:
+                continue
+            seen_clip_ids.add(id(clip))
+            try:
+                clip.close()
+            except Exception:
+                pass
+        if resized_image is not None:
+            resized_image.close()
+        if source_rgb is not None:
+            source_rgb.close()
+        # Drop clip references before collecting memory, then remove the temporary
+        # downscaled raster. The original card and final MP4 are intentionally kept.
+        final_clip = image_clip = audio_clip = source_audio = None
+        gc.collect()
+        cleanup_output_files([render_image_path])
+
+
+def _fade_audio(clip):
+    try:
+        from moviepy.audio.fx import AudioFadeIn, AudioFadeOut
+        return clip.with_effects([AudioFadeIn(0.4), AudioFadeOut(0.8)])
+    except Exception:
+        return clip
 
 
 def _create_concept_frame(style, phase, company, job_title, location, ctc, eligibility, experience, skills, job_description, logo_path, theme):
@@ -883,6 +1050,8 @@ def create_caption(
     application_link=None,
     ctc_source="not_available",
     demo_mode=False,
+    experience=None,
+    job_type=None,
 ):
     if demo_mode:
         caption = (
@@ -896,18 +1065,11 @@ def create_caption(
             file.write(caption)
         return caption
 
-    tag_candidates = [*detect_category(job_title)[:2], *get_location_tags(location)[:1], *get_company_tags(company)[:1]]
-    hashtags = " ".join(dict.fromkeys(tag_candidates))
-    eligibility_text = eligibility or "Bachelor's degree / B.Tech or equivalent"
-    caption_lines = [
-        f"🚀 {job_title} at {company}",
-        f"📍 {location or 'India'}",
-        f"🎓 {eligibility_text}",
-        f"💼 {ctc or 'Salary not disclosed'}",
-        "Scan the QR code or use the link to apply.",
-        f"{application_link or 'Application link not available'}",
-    ]
-    caption = "\n".join(line for line in caption_lines if line)
+    caption = build_caption(
+        company=company, job_title=job_title, location=location, ctc=ctc,
+        eligibility=eligibility, experience=experience, skills=skills, job_type=job_type,
+        application_link=application_link, keyword=comment_keyword(),
+    )
     with open(output_path, "w", encoding="utf-8") as file:
         file.write(caption)
     return caption
@@ -932,6 +1094,8 @@ def create_job_post(
     demo_mode=False,
     reel_style="reference",
     static_image_path=None,
+    job_type=None,
+    logo_hint_url=None,
 ):
     job_title = str(job_title or "")
     company = str(company or "")
@@ -959,7 +1123,8 @@ def create_job_post(
     logo_path = brand_image_path
     if not logo_path:
         try:
-            logo_path = download_logo(company, os.path.join(OUTPUT_DIR, f"{prefix}_company_logo.png"))
+            logo_path = download_logo(company, os.path.join(OUTPUT_DIR, f"{prefix}_company_logo.png"),
+                                      application_link=logo_hint_url)
         except RuntimeError:
             logo_path = None
 
@@ -977,28 +1142,34 @@ def create_job_post(
         card_path = static_image_path
     else:
         print(f"[LOGO] Creating card for company={company} with brand_image_path={logo_path}")
-        card = _create_static_card(
-            company=company,
-            job_title=job_title,
-            location=location,
-            ctc=ctc,
-            eligibility=eligibility,
-            experience=experience,
-            skills=skills,
-            application_link=application_link,
-            brand_image_path=logo_path,
-            job_id=job_id,
-        )
-        card.save(card_path)
 
-    create_video(
-        image_path=card_path,
-        output_path=video_path,
-        background_audio_path=background_audio_path,
-        background_volume=background_volume,
-        theme=create_brand_theme(company, job_title, job_id, logo_path),
-        application_link=application_link,
-    )
+    # The same layered artwork is flattened for the PNG and animated for the MP4.
+    layers = _render_layers(company, job_title, location, ctc, eligibility, experience,
+                            skills, application_link, logo_path, job_type)
+    if card_path != static_image_path:
+        card = layers.flatten()
+        try:
+            card.save(card_path)
+        finally:
+            card.close()
+
+    downloaded_logo_path = logo_path if not brand_image_path and logo_path else None
+    try:
+        create_video(
+            layers=layers,
+            image_path=card_path,
+            output_path=video_path,
+            background_audio_path=background_audio_path,
+            background_volume=background_volume,
+            theme=create_brand_theme(company, job_title, job_id, logo_path),
+            application_link=application_link,
+        )
+    finally:
+        # The logo is already embedded in the saved card; keep user-supplied logos,
+        # but remove the copy downloaded just for this job.
+        layers.close()
+        if downloaded_logo_path:
+            cleanup_output_files([downloaded_logo_path])
 
     caption = create_caption(
         job_title=job_title,
@@ -1013,6 +1184,8 @@ def create_job_post(
         application_link=application_link,
         ctc_source=ctc_source,
         demo_mode=demo_mode,
+        experience=experience,
+        job_type=job_type,
     )
 
     return {
@@ -1020,6 +1193,7 @@ def create_job_post(
         "video": video_path,
         "caption": caption_path,
         "caption_text": caption,
+        "cover_offset_ms": int(COVER_SECONDS * 1000) if env_flag("REEL_MOTION", False) else None,
     }
 
 
