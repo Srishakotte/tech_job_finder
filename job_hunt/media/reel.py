@@ -243,6 +243,25 @@ def employer_domain_from_link(link):
     return ".".join(parts[-2:]) if len(parts) >= 2 else None
 
 
+def domain_matches_company(domain, company):
+    """True when the domain plausibly belongs to the company.
+
+    careers.wipro.com / wipro.com match "Wipro Limited"; freshersworld.com,
+    a link shortener or some other aggregator does not.
+    """
+    if not domain or not company:
+        return False
+    label = domain.split(".")[0].lower()
+    words = [re.sub(r"[^a-z0-9]", "", w) for w in str(company).lower().split()]
+    words = [w for w in words if len(w) >= 3 and w not in {
+        "pvt", "private", "ltd", "limited", "inc", "llp", "llc", "corp", "india",
+        "global", "the", "and", "technologies", "technology", "solutions", "services", "group",
+    }]
+    joined = "".join(words)
+    return bool(joined) and (label in joined or joined.startswith(label) or label.startswith(joined)
+                             or any(w == label or (len(w) >= 4 and w in label) for w in words))
+
+
 def _logo_name_variants(company):
     name = re.sub(r"\s+", " ", str(company or "")).strip()
     short = re.sub(r"(?i)\b(pvt|private|ltd|limited|inc|llp|llc|corp(oration)?|india|global|"
@@ -259,6 +278,11 @@ def download_logo(company, output_path, application_link=None):
     """
     token = os.getenv("LOGO_DEV_TOKEN", "").strip()
     link_domain = employer_domain_from_link(application_link) if application_link else None
+    if link_domain and not domain_matches_company(link_domain, company):
+        # Third-party job sites (freshersworld, aggregators, shorteners...) would
+        # show *their* logo, so only trust the apply-link site when it matches.
+        print(f"[LOGO] {company}: ignoring apply-link site {link_domain} (not the company's)")
+        link_domain = None
     key = str(company or "").lower().strip()
     guessed = get_company_domain(company)
     attempts = []
