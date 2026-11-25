@@ -24,6 +24,7 @@ from telegram.ext import Application
 from tornado.httpserver import HTTPServer
 from tornado.web import Application as WebApp, RequestHandler
 
+from . import legal_pages
 from .integrations import comment_dm
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,15 @@ class HealthHandler(RequestHandler):
 
     def head(self):
         self.set_status(200)
+
+
+class LegalPageHandler(RequestHandler):
+    def initialize(self, render):
+        self.render_page = render
+
+    def get(self):
+        self.set_header("Content-Type", "text/html; charset=utf-8")
+        self.write(self.render_page())
 
 
 class TelegramHandler(RequestHandler):
@@ -110,6 +120,8 @@ def make_web_app(app: Application, telegram_path: str | None, telegram_secret: s
         (r"/", HealthHandler),
         (r"/health", HealthHandler),
         (INSTAGRAM_PATH, InstagramHandler),
+        (r"/privacy", LegalPageHandler, {"render": legal_pages.privacy_policy}),
+        (r"/data-deletion", LegalPageHandler, {"render": legal_pages.data_deletion}),
     ]
     if telegram_path:
         routes.append((f"/{telegram_path}", TelegramHandler, {"app": app, "secret": telegram_secret}))
