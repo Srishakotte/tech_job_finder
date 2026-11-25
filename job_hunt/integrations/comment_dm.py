@@ -58,16 +58,27 @@ def verify_subscription(mode, token, challenge):
     return None
 
 
+def _webhook_secrets():
+    """Instagram-login apps sign webhooks with the *Instagram* app secret;
+    Facebook-login apps use the main app secret. Accept either."""
+    names = ("INSTAGRAM_APP_SECRET", "META_APP_SECRET")
+    return [(n, os.getenv(n, "").strip()) for n in names if os.getenv(n, "").strip()]
+
+
 def signature_is_valid(body: bytes, header: str) -> bool:
-    secret = os.getenv("META_APP_SECRET", "").strip()
-    if not secret:
-        logger.error("META_APP_SECRET is not set; rejecting Instagram webhook.")
+    secrets = _webhook_secrets()
+    if not secrets:
+        logger.error("Set INSTAGRAM_APP_SECRET (or META_APP_SECRET); rejecting Instagram webhook.")
         return False
     header = (header or "").strip().lower()
     if not header.startswith("sha256="):
         return False
-    expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, header)
+    for name, secret in secrets:
+        expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        if hmac.compare_digest(expected, header):
+            return True
+    logger.warning("Webhook signature matched none of: %s", ", ".join(n for n, _ in secrets))
+    return False
 
 
 # --- Graph API ---------------------------------------------------------------
