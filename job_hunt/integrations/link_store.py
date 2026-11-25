@@ -23,20 +23,37 @@ load_environment()
 logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 _mongo_db = None
+_mongo_failed_at = 0.0
+MONGO_RETRY_SECONDS = 600
 
 
 def _mongo():
-    global _mongo_db
+    """MongoDB database, or None (then the local JSON file is used).
+
+    A broken MONGODB_URI (deleted/paused Atlas cluster, DNS error, bad password)
+    must never stop DMs, so failures fall back to the file and retry later.
+    """
+    global _mongo_db, _mongo_failed_at
     uri = os.getenv("MONGODB_URI", "").strip()
     if not uri:
         return None
-    if _mongo_db is None:
+    if _mongo_db is not None:
+        return _mongo_db
+    if time.time() - _mongo_failed_at < MONGO_RETRY_SECONDS:
+        return None
+    try:
         from pymongo import MongoClient
 
         client = MongoClient(uri, serverSelectionTimeoutMS=8000)
         name = os.getenv("MONGODB_DATABASE") or os.getenv("MONGODB_DB") or "job_hunt"
-        _mongo_db = client[name]
-        _mongo_db.comments.create_index("created_at", expireAfterSeconds=30 * 24 * 3600)
+        db = client[name]
+        db.comments.create_index("created_at", expireAfterSeconds=30 * 24 * 3600)
+        _mongo_db = db
+    except Exception as exc:
+        _mongo_failed_at = time.time()
+        logger.error("MongoDB unavailable (%s: %s); using local file storage instead.",
+                     type(exc).__name__, str(exc)[:160])
+        return None
     return _mongo_db
 
 
@@ -65,25 +82,55 @@ def _save(data):
     os.replace(tmp, _file())
 
 
-def save_media_link(media_id, short_link, **details):
-    record = {"short_link": short_link, "created_at": time.time(),
-              **{k: v for k, v in details.items() if v}}
-    db = _mongo()
-    if db is not None:
-        db.media.update_one({"_id": str(media_id)}, {"$set": record}, upsert=True)
-        return
+def _mongo_down(exc):
+    """A Mongo call failed mid-flight: drop the client and use the file for a while."""
+    global _mongo_db, _mongo_failed_at
+    _mongo_db, _mongo_failed_at = None, time.time()
+    logger.error("MongoDB call failed (%s: %s); using local file storage.",
+                 type(exc).__name__, str(exc)[:160])
+
+
+def _file_save_media(media_id, record):
     with _lock:
         data = _load()
         data["media"][str(media_id)] = record
         _save(data)
 
 
+def save_media_link(media_id, short_link, **details):
+    record = {"short_link": short_link, "created_at": time.time(),
+              **{k: v for k, v in details.items() if v}}
+    # Always keep a local copy too, so a later Mongo outage can still answer.
+    _file_save_media(media_id, record)
+    db = _mongo()
+    if db is not None:
+        try:
+            db.media.update_one({"_id": str(media_id)}, {"$set": record}, upsert=True)
+        except Exception as exc:
+            _mongo_down(exc)
+
+
 def get_media_record(media_id):
     db = _mongo()
     if db is not None:
-        return db.media.find_one({"_id": str(media_id)})
+        try:
+            found = db.media.find_one({"_id": str(media_id)})
+            if found:
+                return found
+        except Exception as exc:
+            _mongo_down(exc)
     with _lock:
         return _load()["media"].get(str(media_id))
+
+
+def _file_claim(key):
+    with _lock:
+        data = _load()
+        if key in data["comments"]:
+            return False
+        data["comments"][key] = {"created_at": time.time()}
+        _save(data)
+        return True
 
 
 def claim(key):
@@ -102,21 +149,19 @@ def claim(key):
             return True
         except DuplicateKeyError:
             return False
-    with _lock:
-        data = _load()
-        if key in data["comments"]:
-            return False
-        data["comments"][key] = {"created_at": time.time()}
-        _save(data)
-        return True
+        except Exception as exc:
+            _mongo_down(exc)
+    return _file_claim(key)
 
 
 def release(key):
     """Undo a claim after a failed send so a retry/new comment can succeed."""
     db = _mongo()
     if db is not None:
-        db.comments.delete_one({"_id": key})
-        return
+        try:
+            db.comments.delete_one({"_id": key})
+        except Exception as exc:
+            _mongo_down(exc)
     with _lock:
         data = _load()
         if data["comments"].pop(key, None) is not None:
