@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import os
 import time
 import uuid
@@ -177,6 +178,36 @@ def _wait_for_container(container_id, access_token):
         f"Instagram did not finish processing the Reel within "
         f"{VIDEO_STATUS_TIMEOUT} seconds."
     )
+
+
+def list_recent_media(limit=25):
+    """Recent posts on the connected account: [{id, permalink, timestamp, caption}]."""
+    access_token = _required_config("INSTA_TOKEN")
+    result = _graph_get("me/media", {
+        "fields": "id,permalink,timestamp,caption,media_product_type",
+        "limit": str(limit),
+        "access_token": access_token,
+    })
+    return result.get("data", [])
+
+
+def _shortcode(ref):
+    match = re.search(r"instagram\.com/(?:[^/]+/)?(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", ref or "")
+    return match.group(1) if match else None
+
+
+def find_media(ref, search_limit=100):
+    """Resolve a reel/post URL (or a numeric media ID) to {id, permalink, ...}."""
+    ref = (ref or "").strip()
+    if ref.isdigit():
+        return {"id": ref}
+    code = _shortcode(ref)
+    if not code:
+        raise ValueError("Send an Instagram reel link like https://www.instagram.com/reel/ABC123/")
+    for media in list_recent_media(limit=search_limit):
+        if _shortcode(media.get("permalink")) == code:
+            return media
+    raise LookupError("That reel was not found on your account's last 100 posts.")
 
 
 def publish_reel(video_path, caption, cover_offset_ms=None):

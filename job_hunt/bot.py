@@ -19,7 +19,7 @@ from telegram.ext import (
 from .config import comment_keyword, load_environment
 from .media.card import with_defaults
 from .integrations import link_store
-from .integrations.instagram import publish_reel
+from .integrations.instagram import find_media, list_recent_media, publish_reel
 from .integrations.terabox_links import create_short_link
 from .media.reel import create_job_post, create_static_job_reel
 from .maintenance.output import clean_expired_output, cleanup_output_files, prune_completed_outputs
@@ -146,6 +146,81 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text("📩 Send the complete job post in your next message.")
+
+
+def _is_admin(update: Update):
+    """Optional lock: set TELEGRAM_ADMIN_IDS=123,456 to restrict admin commands."""
+    allowed = {x.strip() for x in os.getenv("TELEGRAM_ADMIN_IDS", "").split(",") if x.strip()}
+    return not allowed or str(update.effective_user.id) in allowed
+
+
+SETLINK_HELP = (
+    "🔗 Attach an apply link to a reel that's already on Instagram, so comments get a DM.\n\n"
+    "Usage:\n/setlink <reel link> <short link>\n\n"
+    "Example:\n/setlink https://www.instagram.com/reel/ABC123/ https://short.link/xyz\n\n"
+    "Use /reels to see which recent reels are missing a link."
+)
+
+
+async def setlink_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+    if not _is_admin(update):
+        await message.reply_text("⛔ You're not allowed to use this command.")
+        return
+    args = context.args or []
+    if len(args) != 2:
+        await message.reply_text(SETLINK_HELP)
+        return
+    reel_ref, short_link = args[0], args[1].rstrip(".,);]}>")
+    if not is_valid_application_link(short_link):
+        await message.reply_text("❌ The second part must be a link starting with http:// or https://")
+        return
+    try:
+        media = await asyncio.to_thread(find_media, reel_ref)
+        await asyncio.to_thread(link_store.save_media_link, media["id"], short_link,
+                                permalink=media.get("permalink"), source="setlink")
+    except (ValueError, LookupError) as exc:
+        await message.reply_text(f"❌ {exc}")
+        return
+    except Exception as exc:
+        logger.exception("/setlink failed")
+        await message.reply_text(f"❌ Could not save the link: {exc}")
+        return
+    await message.reply_text(
+        "✅ Link saved. New comments on this reel will now get a DM with:\n"
+        f"{short_link}\n\n(Comments made before now won't be answered automatically.)"
+    )
+
+
+async def reels_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+    if not _is_admin(update):
+        await message.reply_text("⛔ You're not allowed to use this command.")
+        return
+    try:
+        media_items = await asyncio.to_thread(list_recent_media, 10)
+        lines = []
+        for item in media_items:
+            record = await asyncio.to_thread(link_store.get_media_record, item["id"])
+            mark = "✅" if record and record.get("short_link") else "❌ no link"
+            title = (item.get("caption") or "").split("\n")[0][:45]
+            lines.append(f"{mark}  {title}\n{item.get('permalink', item['id'])}")
+    except Exception as exc:
+        logger.exception("/reels failed")
+        await message.reply_text(f"❌ Could not load your reels: {exc}")
+        return
+    if not lines:
+        await message.reply_text("No posts found on the Instagram account.")
+        return
+    await message.reply_text(
+        "📋 Your last reels (❌ = comments won't get a DM yet):\n\n" + "\n\n".join(lines)
+        + "\n\nFix one with:\n/setlink <reel link> <short link>",
+        disable_web_page_preview=True,
+    )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -695,6 +770,8 @@ def main():
     app = builder.build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("post", post_command))
+    app.add_handler(CommandHandler("setlink", setlink_command))
+    app.add_handler(CommandHandler("reels", reels_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE | filters.Document.AUDIO, handle_audio))
