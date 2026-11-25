@@ -34,7 +34,8 @@ def _mongo():
         from pymongo import MongoClient
 
         client = MongoClient(uri, serverSelectionTimeoutMS=8000)
-        _mongo_db = client[os.getenv("MONGODB_DB", "job_hunt")]
+        name = os.getenv("MONGODB_DATABASE") or os.getenv("MONGODB_DB") or "job_hunt"
+        _mongo_db = client[name]
         _mongo_db.comments.create_index("created_at", expireAfterSeconds=30 * 24 * 3600)
     return _mongo_db
 
