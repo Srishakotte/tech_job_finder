@@ -55,6 +55,11 @@ class LegalPageHandler(RequestHandler):
         self.set_header("Content-Type", "text/html; charset=utf-8")
         self.write(self.render_page())
 
+    def head(self):
+        # Meta's URL checker probes with HEAD before accepting a privacy URL.
+        self.set_header("Content-Type", "text/html; charset=utf-8")
+        self.set_status(200)
+
 
 class TelegramHandler(RequestHandler):
     def initialize(self, app: Application, secret: str):
