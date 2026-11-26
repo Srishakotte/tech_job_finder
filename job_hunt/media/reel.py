@@ -950,6 +950,53 @@ def create_video(
         cleanup_output_files([render_image_path])
 
 
+def encode_static_video(image_path, output_path, background_audio_path=None,
+                        background_volume=DEFAULT_BACKGROUND_VOLUME, music_dir=MUSIC_DIR):
+    """Still image + music -> MP4 using ffmpeg directly (no frames in Python).
+
+    MoviePy feeds every frame through NumPy, which pushed a 1080x1920 encode past
+    Render Free's 512 MB. ffmpeg's still-image mode needs a fraction of that.
+    """
+    import subprocess
+
+    import imageio_ffmpeg
+
+    duration = REEL_DURATION_SECONDS
+    width, height = (WIDTH, HEIGHT) if env_flag("REEL_STATIC_FULL_RES", True) else (RENDER_WIDTH, RENDER_HEIGHT)
+    audio = background_audio_path or (resolve_background_music_path(music_dir) if music_dir else None)
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+    # Single-threaded everywhere: ffmpeg's default thread pools took ~330 MB at
+    # 1080x1920; one thread keeps it around 90 MB with identical output quality.
+    cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
+           "-threads", "1", "-filter_threads", "1",
+           "-loop", "1", "-framerate", str(RENDER_FPS), "-i", str(image_path)]
+    if audio:
+        cmd += ["-stream_loop", "-1", "-i", str(audio)]
+    cmd += [
+        "-t", str(duration),
+        "-vf", f"scale={width}:{height}:flags=lanczos,format=yuv420p",
+        "-c:v", "libx264", "-preset", os.getenv("REEL_X264_PRESET", "veryfast"),
+        "-tune", "stillimage", "-crf", "20", "-r", str(RENDER_FPS),
+        "-threads", "1",
+        "-x264-params", "threads=1:lookahead-threads=1:sliced-threads=0:bframes=0:ref=1:"
+                        "rc-lookahead=0:sync-lookahead=0",
+        "-movflags", "+faststart",
+    ]
+    if audio:
+        fade_out = max(0.0, duration - 0.8)
+        cmd += ["-af", f"volume={background_volume},afade=t=in:d=0.4,afade=t=out:st={fade_out}:d=0.8",
+                "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-shortest"]
+    else:
+        cmd += ["-an"]
+    cmd.append(str(output_path))
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0 or not os.path.isfile(output_path):
+        raise RuntimeError(f"ffmpeg could not create the Reel: {result.stderr.strip()[-400:]}")
+    print(f"[REEL] Wrote {output_path}; static {width}x{height}, {duration}s, audio={bool(audio)}")
+    return output_path
+
+
 def _fade_audio(clip):
     try:
         from moviepy.audio.fx import AudioFadeIn, AudioFadeOut
@@ -1167,31 +1214,43 @@ def create_job_post(
     else:
         print(f"[LOGO] Creating card for company={company} with brand_image_path={logo_path}")
 
-    # The same layered artwork is flattened for the PNG and animated for the MP4.
-    layers = _render_layers(company, job_title, location, ctc, eligibility, experience,
-                            skills, application_link, logo_path, job_type)
-    if card_path != static_image_path:
-        card = layers.flatten()
-        try:
-            card.save(card_path)
-        finally:
-            card.close()
-
+    animated = env_flag("REEL_MOTION", False)
     downloaded_logo_path = logo_path if not brand_image_path and logo_path else None
+    layers = None
     try:
-        create_video(
-            layers=layers,
-            image_path=card_path,
-            output_path=video_path,
-            background_audio_path=background_audio_path,
-            background_volume=background_volume,
-            theme=create_brand_theme(company, job_title, job_id, logo_path),
-            application_link=application_link,
-        )
+        if animated or card_path != static_image_path:
+            layers = _render_layers(company, job_title, location, ctc, eligibility, experience,
+                                    skills, application_link, logo_path, job_type)
+            if card_path != static_image_path:
+                card = layers.flatten()
+                try:
+                    card.save(card_path)
+                finally:
+                    card.close()
+        if animated:
+            # The same layered artwork is flattened for the PNG and animated for the MP4.
+            create_video(
+                layers=layers,
+                image_path=card_path,
+                output_path=video_path,
+                background_audio_path=background_audio_path,
+                background_volume=background_volume,
+                theme=create_brand_theme(company, job_title, job_id, logo_path),
+                application_link=application_link,
+            )
+        else:
+            # Static Reel: free the artwork first, then let ffmpeg turn the PNG into
+            # an MP4 directly. This keeps peak RAM far below Render Free's 512 MB.
+            if layers is not None:
+                layers.close()
+                layers = None
+            gc.collect()
+            encode_static_video(card_path, video_path, background_audio_path, background_volume)
     finally:
         # The logo is already embedded in the saved card; keep user-supplied logos,
         # but remove the copy downloaded just for this job.
-        layers.close()
+        if layers is not None:
+            layers.close()
         if downloaded_logo_path:
             cleanup_output_files([downloaded_logo_path])
 
