@@ -40,6 +40,14 @@ DEFAULT_DM = (
     "✅ Please verify the role on the company's official careers page.\n"
     "🔔 Follow us for daily tech jobs & internships. All the best!"
 )
+# Text shown above the tappable "Apply Now" button (Instagram limit: 640 chars).
+DEFAULT_BUTTON_DM = (
+    "Hi {username} 👋\n\n"
+    "Here's the apply link for {role_at_company} 👇\n\n"
+    "✅ Verify the role on the company's official careers page.\n"
+    "🔔 Follow us for daily tech jobs & internships!"
+)
+DEFAULT_BUTTON_TITLE = "Apply Now"
 DEFAULT_PUBLIC_REPLIES = [
     "Sent you the link in DMs 📩",
     "Check your DMs 📩 All the best!",
@@ -128,6 +136,42 @@ def send_private_reply(comment_id, text):
     return result["message_id"]
 
 
+def send_private_reply_button(comment_id, text, url, title=DEFAULT_BUTTON_TITLE):
+    """Private reply with a tappable web_url button.
+
+    Plain-text links in a DM from an account the person doesn't follow land in
+    Message Requests, where Instagram shows them as unclickable text. A button
+    template renders a real button that opens the link.
+    """
+    payload = {
+        "template_type": "button",
+        "text": text[:640],
+        "buttons": [{"type": "web_url", "url": url, "title": (title or DEFAULT_BUTTON_TITLE)[:20]}],
+    }
+    result = _post(f"{os.getenv('INSTAGRAM_USER_ID') or 'me'}/messages",
+                   json_body={"recipient": {"comment_id": str(comment_id)},
+                              "message": {"attachment": {"type": "template", "payload": payload}}})
+    if not result.get("message_id"):
+        raise RuntimeError("Instagram did not confirm the button reply.")
+    return result["message_id"]
+
+
+def deliver_link(comment_id, username, record, link):
+    """Send the apply link as a button; fall back to plain text if refused.
+
+    Instagram allows only ONE private reply per comment, so the fallback is only
+    attempted when the button request itself was rejected (nothing delivered).
+    """
+    if env_flag("COMMENT_DM_BUTTON", True):
+        try:
+            return send_private_reply_button(comment_id, _render_dm(username, record, link, button=True), link,
+                                             os.getenv("COMMENT_DM_BUTTON_TITLE") or DEFAULT_BUTTON_TITLE)
+        except Exception as exc:
+            logger.warning("Button DM refused for comment %s (%s); sending plain text instead.",
+                           comment_id, str(exc)[:200])
+    return send_private_reply(comment_id, _render_dm(username, record, link))
+
+
 def send_public_reply(comment_id, text):
     return _post(f"{comment_id}/replies", data={"message": text})
 
@@ -159,17 +203,22 @@ def _is_own_comment(value, account_id):
     return str(sender.get("id", "")) in own_ids or (own_name and sender.get("username", "").lower() == own_name)
 
 
-def _render_dm(username, record, link):
+def _render_dm(username, record, link, button=False):
     role, company = (record or {}).get("role"), (record or {}).get("company")
     if role and company:
         role_at_company = f"{role} at {company}"
     else:
         role_at_company = role or company or "this role"
-    template = os.getenv("COMMENT_DM_MESSAGE") or DEFAULT_DM
+    if button:
+        template = os.getenv("COMMENT_DM_BUTTON_MESSAGE") or DEFAULT_BUTTON_DM
+        limit = 640
+    else:
+        template = os.getenv("COMMENT_DM_MESSAGE") or DEFAULT_DM
+        limit = 1000
     template = template.replace("\\n", "\n")
     return template.format(username=f"@{username}" if username else "there",
                            role_at_company=role_at_company, role=role or "", company=company or "",
-                           link=link)[:1000]
+                           link=link)[:limit]
 
 
 def process_comment(value, account_id=None):
@@ -199,7 +248,7 @@ def process_comment(value, account_id=None):
         return "already-sent-to-user"
 
     try:
-        send_private_reply(comment_id, _render_dm(sender.get("username"), record, link))
+        deliver_link(comment_id, sender.get("username"), record, link)
     except Exception:
         link_store.release(f"c:{comment_id}")
         if user_key:

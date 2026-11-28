@@ -30,6 +30,8 @@ class CommentDmTests(unittest.TestCase):
         self.store = mock.patch.object(link_store, "DATA_DIR", Path(self.tmp.name))
         self.store.start()
         link_store.save_media_link("m1", "https://sh.rt/x", role="SDE", company="Acme")
+        # Plain-text path; the button path is exercised in its own tests below.
+        mock.patch.dict(os.environ, {"COMMENT_DM_BUTTON": "false"}).start()
         self.dm = mock.patch.object(comment_dm, "send_private_reply", return_value="mid").start()
         self.reply = mock.patch.object(comment_dm, "send_public_reply").start()
 
@@ -72,6 +74,33 @@ class CommentDmTests(unittest.TestCase):
             self.assertEqual(comment_dm.process_comment(comment(media_id="m2")), "sent")
             cap.assert_called_once_with("m2")
             self.assertIn("https://cap/l", self.dm.call_args.args[1])
+
+
+class ButtonDmTests(unittest.TestCase):
+    def setUp(self):
+        mock.patch.dict(os.environ, {"COMMENT_DM_BUTTON": "true", "INSTAGRAM_USER_ID": "999",
+                                     "INSTA_TOKEN": "t"}).start()
+        self.post = mock.patch.object(comment_dm, "_post", return_value={"message_id": "m1"}).start()
+
+    def tearDown(self):
+        mock.patch.stopall()
+
+    def test_sends_tappable_button_with_short_link(self):
+        comment_dm.deliver_link("c9", "asha", {"role": "SDE", "company": "Acme"}, "https://sh.rt/x")
+        body = self.post.call_args.kwargs["json_body"]
+        payload = body["message"]["attachment"]["payload"]
+        self.assertEqual(body["recipient"], {"comment_id": "c9"})
+        self.assertEqual(payload["template_type"], "button")
+        self.assertEqual(payload["buttons"][0], {"type": "web_url", "url": "https://sh.rt/x", "title": "Apply Now"})
+        self.assertIn("SDE at Acme", payload["text"])
+        self.assertLessEqual(len(payload["text"]), 640)
+
+    def test_falls_back_to_text_when_button_refused(self):
+        self.post.side_effect = [RuntimeError("template not supported"), {"message_id": "m2"}]
+        comment_dm.deliver_link("c9", "asha", None, "https://sh.rt/x")
+        self.assertEqual(self.post.call_count, 2)
+        text = self.post.call_args.kwargs["json_body"]["message"]["text"]
+        self.assertIn("https://sh.rt/x", text)
 
 
 class InstagramWebhookTests(AsyncHTTPTestCase):
